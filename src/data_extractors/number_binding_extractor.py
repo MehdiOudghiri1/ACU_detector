@@ -25,9 +25,23 @@ def is_base_like(txt: str) -> bool:
     t = _letters(txt)
     return t == "BASE" or t == "ESAB"
 
+# --- add this helper next to is_base_like() ---
+def is_inlet_like(txt: str) -> bool:
+    """'INLET' or reversed 'TELNI' (case-insensitive)."""
+    if not txt: 
+        return False
+    t = _letters(txt)
+    return t == "INLET" or t == "TELNI"
+
+
 def is_target_word(txt: str) -> bool:
     """We consider Opn/npO, any O.D.-like, and BASE/ESAB."""
-    return is_opn_like(txt) or is_od_like(txt) or is_base_like(txt)
+    return (
+        is_opn_like(txt)
+        or is_od_like(txt) 
+        or is_base_like(txt)
+        or is_inlet_like(txt)
+    )
 
 
 # ============================ Geometry helpers ==============================
