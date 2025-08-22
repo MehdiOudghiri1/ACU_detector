@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Tuple
-from data_extractor import ExtractionContext
-from data_extractor import DataExtractor
+from .data_extractor import ExtractionContext
+from .data_extractor import DataExtractor
 from PIL import ImageDraw
 import pdfplumber
 from typing import Any

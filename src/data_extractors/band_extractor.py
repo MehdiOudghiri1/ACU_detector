@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw
-from data_extractor import ExtractionContext, DataExtractor
+from .data_extractor import ExtractionContext, DataExtractor
 import logging
 
 

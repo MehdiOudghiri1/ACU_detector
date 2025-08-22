@@ -13,9 +13,9 @@ import os
 import pdfplumber
 from PIL import Image, ImageDraw
 
-from data_extractor import ExtractionContext
-from band_extractor import BandeExtractor, Bande
-from number_binding_extractor import NumberBindingExtractor
+from .data_extractor import ExtractionContext
+from .band_extractor import BandeExtractor, Bande
+from .number_binding_extractor import NumberBindingExtractor
 
 
 
@@ -261,7 +261,7 @@ class UExtractor:
         thr: int = 60,
         min_thick: int = 1,
         max_thick: int = 19,
-        v_min_len: int = 21,
+        v_min_len: int = 22,
         h_min_len: int = 21,
         bridge: int = 1,
 
@@ -384,12 +384,90 @@ class UExtractor:
 
     def extract(self, context: "ExtractionContext", shared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run the full pipeline in either V or H mode and return sets of pixel rectangles."""
+        import re
+
+        # ---------------- helpers ----------------
+
+        def _coerce_float(v: Any, default: float) -> float:
+            if isinstance(v, (list, tuple)):
+                v = v[0] if v else default
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        def _parse_num_with_suffix(s: str) -> Optional[float]:
+            """
+            Parse a numeric token with optional k/m/b suffix, e.g. '25k', '12.5kV', '9.5M'.
+            """
+            if not s:
+                return None
+            m = re.search(r'[-+]?\d+(?:[.,]\d+)?\s*([kKmMbB])?', s)
+            if not m:
+                return None
+            num_part = re.search(r'[-+]?\d+(?:[.,]\d+)?', m.group(0))
+            if not num_part:
+                return None
+            val = float(num_part.group(0).replace(',', '.'))
+            suf = m.group(1)
+            if suf:
+                if suf in ('k', 'K'):
+                    val *= 1_000.0
+                elif suf in ('m', 'M'):
+                    val *= 1_000_000.0
+                elif suf in ('b', 'B'):
+                    val *= 1_000_000_000.0
+            return val
+
+        def _bbox_contains(outer, inner, pad: float = 0.0) -> bool:
+            ox0, ot, ox1, ob = outer
+            ix0, it, ix1, ib = inner
+            return (ix0 >= ox0 - pad and ix1 <= ox1 + pad and it >= ot - pad and ib <= ob + pad)
+
+        # ------------- setup (unchanged) -------------
+
         self.context = context
         self.band_extractor = self._resolve_bde(context, shared)
         self.number_binding_extractor = self._resolve_nbe(context, shared)
 
-        # 1) Targets (bindings + numbers)
-        target_bboxes_pts = self._targets(context, self.number_binding_extractor, shared)
+        # threshold for NUMBER bboxes used in H-mode
+        min_num_thresh = _coerce_float(getattr(self, "min_number_for_h", 10.0), 10.0)
+
+        # Get NBE items once
+        if getattr(self.number_binding_extractor, "result", None) is None:
+            nbe_items: List[Dict[str, Any]] = self.number_binding_extractor.extract(context, shared=(shared or {}))
+        else:
+            nbe_items = self.number_binding_extractor.result
+
+        # Build a quick value map for NUMBER bboxes by reading words inside each number bbox
+        # This is the key fix: your NumberBindingExtractor doesn't store the text for numbers.
+        words_all = context.words()  # list of dicts with x0, top, x1, bottom, text
+        number_value_by_bbox: Dict[Tuple[float, float, float, float], Optional[float]] = {}
+
+        for it in nbe_items:
+            if it.get("type") != "number":
+                continue
+            nb = it["bbox"]
+            # gather tokens whose bbox is fully inside the number bbox (strict but robust)
+            tokens_inside = []
+            for w in words_all:
+                wb = (w["x0"], w["top"], w["x1"], w["bottom"])
+                if _bbox_contains(nb, wb, pad=0.0):
+                    tokens_inside.append(str(w.get("text", "")))
+            # choose the best token to parse (longest digit-bearing token first)
+            parsed_val: Optional[float] = None
+            if tokens_inside:
+                # prefer tokens that contain a digit
+                tokens_inside.sort(key=lambda t: (any(c.isdigit() for c in t), len(t)), reverse=True)
+                for tok in tokens_inside:
+                    parsed_val = _parse_num_with_suffix(tok)
+                    if parsed_val is not None:
+                        break
+            number_value_by_bbox[nb] = parsed_val  # may be None if nothing parsed
+
+        # 1) Targets (bindings + numbers) — for PASS-A verticals
+        target_bboxes_pts = [it["bbox"] for it in nbe_items if it.get("type") in {"binding", "number"}]
+        logging.info("Targets (bindings+numbers): %d", len(target_bboxes_pts))
 
         # 2) PASS-A: compute V near bbox for ALL targets (always first)
         verticals_per_target: List[List["Bande"]] = []
@@ -448,11 +526,24 @@ class UExtractor:
                     for h_band in h_list:
                         out_h_near_v.add(self._as_rect_px(h_band))
         else:
-            # --h: only use NON-blacklisted bboxes, and EXCLUDE any H that are blacklisted-from-V
+            # --h: only use NON-blacklisted NUMBER bboxes with parsed value >= threshold
+            num_total = sum(1 for it in nbe_items if it.get("type") == "number")
+            num_non_blacklisted = 0
+            num_passing_threshold = 0
             used_count = 0
-            for bbox_pts in target_bboxes_pts:
+
+            for it in nbe_items:
+                if it.get("type") != "number":
+                    continue
+                bbox_pts = it["bbox"]
                 if bbox_pts in blacklist_bboxes:
                     continue
+                num_non_blacklisted += 1
+
+                val = number_value_by_bbox.get(bbox_pts)
+                if val is None or val < min_num_thresh:
+                    continue
+                num_passing_threshold += 1
 
                 h_found_map = find_horizontal_bands_near_number(
                     context,
@@ -482,9 +573,13 @@ class UExtractor:
                 used_count += 1
 
             logging.info(
-                "H detection used %d non-blacklisted bboxes; skipped %d. "
+                "Numbers: total=%d, non-blacklisted=%d, >= threshold(%.2f)=%d",
+                num_total, num_non_blacklisted, min_num_thresh, num_passing_threshold
+            )
+            logging.info(
+                "H detection used %d non-blacklisted NUMBER bboxes (>= %.2f). "
                 "Filtered out %d H via blacklist-from-V.",
-                used_count, len(blacklist_bboxes), len(blacklist_h_from_v)
+                used_count, min_num_thresh, len(blacklist_h_from_v)
             )
 
         return {

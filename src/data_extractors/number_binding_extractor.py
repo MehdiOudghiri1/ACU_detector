@@ -130,7 +130,7 @@ def closest_number_for_horizontal_word(word_bbox, number_bboxes, y_tol: float = 
 
 # ============================ DataExtractor impl ============================
 
-from data_extractor import DataExtractor, ExtractionContext  # keep your existing imports
+from .data_extractor import DataExtractor, ExtractionContext  # keep your existing imports
 
 class NumberBindingExtractor(DataExtractor):
     """
@@ -355,7 +355,7 @@ def main():
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
 
-    from data_extractor import ExtractionContext  # ensure available at runtime
+    from .data_extractor import ExtractionContext  # ensure available at runtime
 
     with pdfplumber.open(str(pdf_path)) as pdf:
         if not (0 <= args.page < len(pdf.pages)):

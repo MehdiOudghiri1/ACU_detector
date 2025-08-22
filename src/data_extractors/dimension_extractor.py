@@ -1,4 +1,4 @@
-from data_extractor import DataExtractor, ExtractionContext
+from .data_extractor import DataExtractor, ExtractionContext
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import pdfplumber
